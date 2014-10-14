@@ -1,9 +1,8 @@
 package legacycode;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import java.io.IOException;
-import java.math.BigInteger;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Properties;
 import java.util.regex.Matcher;
@@ -22,12 +21,17 @@ import javax.servlet.http.HttpServletResponse;
 
 public class PaymentServlet extends HttpServlet{
 
-    private static final String secret = "15c84df6-bfa3-46c1-8929-a5dedaeab4a4";
+    private final PaymentService paymentService;
 
-    private PaymentService paymentService;
-    
+    private final MessageDigestValidator messageDigestValidator;
+
+    public PaymentServlet(PaymentService paymentService, MessageDigestValidator messageDigestValidator) {
+        this.paymentService = paymentService;
+        this.messageDigestValidator = messageDigestValidator;
+    }
+
     public PaymentServlet() {
-        paymentService = new PaymentService();
+        this(new PaymentService(), new MessageDigestValidator());
     }
     
     @Override
@@ -38,63 +42,50 @@ public class PaymentServlet extends HttpServlet{
         String payload = req.getParameter("payload");
         String timestamp = req.getParameter("ts");
         String md5 = req.getParameter("md5");           // md5(amount + status + payload + timestamp + secret)
-    
-        try {
-            
-            MessageDigest digest = MessageDigest.getInstance("MD5");
-            digest.update(amount.getBytes());
-            digest.update(status.getBytes());
-            digest.update(payload.getBytes());
-            digest.update(timestamp.getBytes());
-            digest.update(secret.getBytes());
-            
-            String expectedMd5 = String.format("%x", new BigInteger(1, digest.digest()));
-            System.out.println("Expected MD5: " + expectedMd5);
-            
-            if(!expectedMd5.equals(md5)){
-                resp.sendError(HttpServletResponse.SC_FORBIDDEN, "MD5 signature do not match!");
-                return;
-            }
-            
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException(e);
-        }
 
-        if(Math.abs(System.currentTimeMillis() - Long.valueOf(timestamp)) > 60000){
-            resp.sendError(HttpServletResponse.SC_FORBIDDEN, "Timestamp do not match!");
+        handle(resp, amount, status, payload, timestamp, md5);
+    }
+
+    @VisibleForTesting
+    void handle(HttpServletResponse resp, String amount, String status, String payload, String timestamp, String md5) throws IOException {
+        try {
+            messageDigestValidator.validate(amount, status, payload, timestamp, md5);
+        } catch (PaymentValidationException e) {
+            resp.sendError(HttpServletResponse.SC_FORBIDDEN, e.getMessage());
             return;
         }
-        
-        boolean isSBS = false; 
+
+        // business logic starts here
+        boolean isSBS = false;
         String orderId = null;
-        
-        Pattern sbsPattern = Pattern.compile(".*order_id:(\\d{4}).*");      
+
+        Pattern sbsPattern = Pattern.compile(".*order_id:(\\d{4}).*");
         Matcher sbsMatcher = sbsPattern.matcher(payload);
-        if(sbsMatcher.matches()){
+        if (sbsMatcher.matches()) {
             isSBS = true;
-            orderId = sbsMatcher.group(1); 
+            orderId = sbsMatcher.group(1);
         }
-        
+
         Pattern transPattern = Pattern.compile("^(\\d{5,7}(S|K|G)).*");
         Matcher transMatcher = transPattern.matcher(payload);
-        if(transMatcher.matches()){
+        if (transMatcher.matches()) {
             isSBS = false;
             orderId = transMatcher.group(1);
         }
-        
-        if(orderId == null){
-            
+
+        if (orderId == null) {
+
             // Neither SBS nor Trans. Reject.
             resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Unrecognized format of payload!");
             return;
         }
-        
-        if(isSBS){
+
+        if (isSBS) {
 
             SbsOrderDao sbsDao = SbsOrderDao.getInstance();
             Order order = sbsDao.findOrderById(orderId);
 
-            if(order == null || !"PENDING".equals(order.getStatus())){
+            if (order == null || !"PENDING".equals(order.getStatus())) {
                 resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "No pending oder with id: " + orderId + "!");
                 return;
             }
@@ -142,22 +133,22 @@ public class PaymentServlet extends HttpServlet{
                     sendEmail("admin@oursystem.com", "Order #" + orderId + " has surplus of " + surplus, "");
                 }
             }
-            
+
         } else {
-            
+
             Transaction transaction = paymentService.findTransactionById(orderId);
-            
-            if(transaction == null || !transaction.isActive()){
+
+            if (transaction == null || !transaction.isActive()) {
                 resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "No active transaction with transaction_id: " + orderId + "!");
                 return;
             }
-            
+
             List<Transaction> transactions = paymentService.findTransactionsByPaymentId(transaction.getPaymentId());
-            
+
             for (Transaction t : transactions) {
-                
+
                 // only one active transaction is allowed!
-                if(t.isActive() && t.getId() != transaction.getId()){
+                if (t.isActive() && t.getId() != transaction.getId()) {
                     resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Multiple active transactions detected for payment: " + transaction.getPaymentId() + "!");
                     return;
                 }
@@ -190,7 +181,7 @@ public class PaymentServlet extends HttpServlet{
             }
 
         }
-        
+
         resp.getOutputStream().print("OK");
     }
 
