@@ -16,11 +16,11 @@ public class MessageDigestValidator {
         System.out.println("Expected MD5: " + expectedMd5);
 
         if (!expectedMd5.equals(md5)) {
-            throw new PaymentValidationException("MD5 signature do not match!");
+            throw new PaymentValidationException("MD5 signature does not match!");
         }
 
         if (Math.abs(currentTime() - Long.valueOf(timestamp)) > 60000) {
-            throw new PaymentValidationException("Timestamp do not match!");
+            throw new PaymentValidationException("Timestamp does not match!");
         }
     }
 
